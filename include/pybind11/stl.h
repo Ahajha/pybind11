@@ -32,6 +32,10 @@
 #    include <variant>
 #endif
 
+#ifdef __cpp_lib_expected
+#    include <expected>
+#endif
+
 PYBIND11_NAMESPACE_BEGIN(PYBIND11_NAMESPACE)
 PYBIND11_NAMESPACE_BEGIN(detail)
 
@@ -424,12 +428,59 @@ struct variant_caster<V<Ts...>> {
                              + const_name("]"));
 };
 
+/// Generic expected caster
+template <typename E>
+struct expected_caster;
+
+template <template <typename, typename> class E, typename TValue, typename TError>
+struct expected_caster<E<TValue, TError>> {
+    using expected_type = E<TValue, TError>;
+
+    // I'm not sure what we should call this, as we never actually hold it
+    // on the python side, it's exclusively deconstructed. In our case, we really
+    // only care about the conversion from C++ to Python.
+    // Maybe something like `Union[TValue, TError]`?
+    PYBIND11_TYPE_CASTER(expected_type, pybind11::detail::const_name("expected"));
+
+    // load() is not implemented - we are only interested in unwrapping expected
+    // types from C++, not re-wrapping them.
+
+    // This is templated so that it takes a universal reference rather than an
+    // rvalue reference.
+    static pybind11::handle cast(std::same_as<expected_type> auto &&src,
+                                 pybind11::return_value_policy policy,
+                                 pybind11::handle parent) {
+        if (src.has_value()) {
+            return pybind11::detail::make_caster<TValue>::cast(
+                std::forward<expected_type>(src).value(), policy, parent);
+        } else {
+            // The goal here is to defer to __repr__ for consistent formatting with
+            // Python
+            if constexpr (std::same_as<TError, std::string>) {
+                // Optimize in this case, no need to convert to python to get its
+                // representation
+                throw std::runtime_error(std::forward<expected_type>(src).error());
+            } else {
+                auto str = pybind11::detail::make_caster<TError>::cast(
+                    std::forward<expected_type>(src).error(), policy, parent);
+                throw std::runtime_error(pybind11::repr(std::move(str)));
+            }
+        }
+    }
+};
+
 #if defined(PYBIND11_HAS_VARIANT)
 template <typename... Ts>
 struct type_caster<std::variant<Ts...>> : variant_caster<std::variant<Ts...>> {};
 
 template <>
 struct type_caster<std::monostate> : public void_caster<std::monostate> {};
+#endif
+
+#ifdef __cpp_lib_expected
+template <typename TValue, typename TError>
+struct pybind11::detail::type_caster<std::expected<TValue, TError>>
+    : expected_caster<std::expected<TValue, TError>> {};
 #endif
 
 PYBIND11_NAMESPACE_END(detail)
